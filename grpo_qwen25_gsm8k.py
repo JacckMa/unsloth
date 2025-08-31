@@ -26,11 +26,23 @@ MODEL_SAVE_PATH = os.path.join(SAVE_ROOT, "qwen25_grpo_model")
 CHECKPOINT_PATH = os.path.join(SAVE_ROOT, "qwen25_grpo_checkpoint") 
 DATA_CACHE_PATH = os.path.join(SAVE_ROOT, "gsm8k_cache")
 LOG_PATH = os.path.join(SAVE_ROOT, "training_logs")
-MODEL_CACHE_PATH = os.path.join(SAVE_ROOT, "model_cache")  # 新增：预训练模型缓存路径
+MODEL_CACHE_PATH = os.path.join(SAVE_ROOT, "model_cache")  # 预训练模型缓存路径
+LOCAL_MODEL_PATH = os.path.join(SAVE_ROOT, "models", "Qwen2.5-1.5B-Instruct")  # 本地模型路径
 
 # 创建所有必要的目录
 for path in [MODEL_SAVE_PATH, CHECKPOINT_PATH, DATA_CACHE_PATH, LOG_PATH, MODEL_CACHE_PATH]:
     os.makedirs(path, exist_ok=True)
+
+# 检查本地模型是否存在
+def check_local_model():
+    """检查本地模型是否存在"""
+    if os.path.exists(LOCAL_MODEL_PATH) and os.path.exists(os.path.join(LOCAL_MODEL_PATH, "config.json")):
+        print(f"✅ 发现本地模型: {LOCAL_MODEL_PATH}")
+        return True
+    else:
+        print(f"❌ 本地模型不存在: {LOCAL_MODEL_PATH}")
+        print(f"💡 请先运行: python download_model.py")
+        return False
 
 # 设置HuggingFace缓存目录
 os.environ["HF_HOME"] = MODEL_CACHE_PATH
@@ -43,6 +55,14 @@ print(f"💾 检查点保存路径: {CHECKPOINT_PATH}")
 print(f"📊 日志保存路径: {LOG_PATH}")
 print(f"🗂️ 数据缓存路径: {DATA_CACHE_PATH}")
 print(f"🤗 预训练模型缓存路径: {MODEL_CACHE_PATH}")
+print(f"🏠 本地模型路径: {LOCAL_MODEL_PATH}")
+
+# 检查本地模型
+if not check_local_model():
+    print("\n⚠️ 请先下载模型:")
+    print("   python download_model.py")
+    print("\n或者修改代码使用在线下载模式")
+    exit(1)
 
 # ============================================================================
 # 1. 模型和分词器加载
@@ -70,13 +90,13 @@ print("🔧 加载模型和分词器...")
 print(f"{'='*60}")
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="Qwen/Qwen2.5-1.5B-Instruct",
+    model_name=LOCAL_MODEL_PATH,  # 使用本地模型路径
     max_seq_length=max_seq_length,
     load_in_4bit=False,  # 参照测试文件，GRPO训练时不使用4bit
     fast_inference=True,  # 参照测试文件
     max_lora_rank=lora_rank,
     gpu_memory_utilization=0.7,  # 参照测试文件
-    cache_dir=MODEL_CACHE_PATH,  # 指定模型下载缓存目录
+    # 不需要cache_dir，因为直接从本地加载
 )
 
 print("✅ 模型加载完成！")
