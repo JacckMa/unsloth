@@ -26,16 +26,23 @@ MODEL_SAVE_PATH = os.path.join(SAVE_ROOT, "qwen25_grpo_model")
 CHECKPOINT_PATH = os.path.join(SAVE_ROOT, "qwen25_grpo_checkpoint") 
 DATA_CACHE_PATH = os.path.join(SAVE_ROOT, "gsm8k_cache")
 LOG_PATH = os.path.join(SAVE_ROOT, "training_logs")
+MODEL_CACHE_PATH = os.path.join(SAVE_ROOT, "model_cache")  # 新增：预训练模型缓存路径
 
 # 创建所有必要的目录
-for path in [MODEL_SAVE_PATH, CHECKPOINT_PATH, DATA_CACHE_PATH, LOG_PATH]:
+for path in [MODEL_SAVE_PATH, CHECKPOINT_PATH, DATA_CACHE_PATH, LOG_PATH, MODEL_CACHE_PATH]:
     os.makedirs(path, exist_ok=True)
+
+# 设置HuggingFace缓存目录
+os.environ["HF_HOME"] = MODEL_CACHE_PATH
+os.environ["TRANSFORMERS_CACHE"] = MODEL_CACHE_PATH
+os.environ["HF_HUB_CACHE"] = MODEL_CACHE_PATH
 
 print(f"🚀 开始GRPO微调 Qwen2.5-1.5B-Instruct")
 print(f"📁 模型保存路径: {MODEL_SAVE_PATH}")
 print(f"💾 检查点保存路径: {CHECKPOINT_PATH}")
 print(f"📊 日志保存路径: {LOG_PATH}")
 print(f"🗂️ 数据缓存路径: {DATA_CACHE_PATH}")
+print(f"🤗 预训练模型缓存路径: {MODEL_CACHE_PATH}")
 
 # ============================================================================
 # 1. 模型和分词器加载
@@ -45,6 +52,18 @@ from unsloth import FastLanguageModel
 
 max_seq_length = 2048
 lora_rank = 32  # 适中的rank，平衡性能和效果
+
+# 定义格式化标签（移到前面避免变量未定义错误）
+reasoning_start = "<start_working_out>"
+reasoning_end = "<end_working_out>"
+solution_start = "<SOLUTION>"
+solution_end = "</SOLUTION>"
+
+# 添加调试变量（参照测试文件）
+global PRINTED_TIMES
+PRINTED_TIMES = 0
+global PRINT_EVERY_STEPS
+PRINT_EVERY_STEPS = 5
 
 print(f"\n{'='*60}")
 print("🔧 加载模型和分词器...")
@@ -57,6 +76,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     fast_inference=True,  # 参照测试文件
     max_lora_rank=lora_rank,
     gpu_memory_utilization=0.7,  # 参照测试文件
+    cache_dir=MODEL_CACHE_PATH,  # 指定模型下载缓存目录
 )
 
 print("✅ 模型加载完成！")
@@ -120,12 +140,6 @@ print("✅ LoRA配置完成！")
 print(f"\n{'='*60}")
 print("📚 准备GSM8K数据集...")
 print(f"{'='*60}")
-
-# 定义格式化标签（参照测试文件）
-reasoning_start = "<start_working_out>"
-reasoning_end = "<end_working_out>"
-solution_start = "<SOLUTION>"
-solution_end = "</SOLUTION>"
 
 def extract_answer_from_gsm8k(text):
     """从GSM8K格式中提取最终答案"""
@@ -292,12 +306,6 @@ def reasoning_quality_checker(prompts, completions, answer, **kwargs):
             continue
     return scores
 
-# 添加调试变量（参照测试文件）
-global PRINTED_TIMES
-PRINTED_TIMES = 0
-global PRINT_EVERY_STEPS
-PRINT_EVERY_STEPS = 5
-
 print("✅ 奖励函数定义完成！")
 
 # ============================================================================
@@ -321,18 +329,38 @@ print(f"📏 最大提示长度: {max_prompt_length}")
 print(f"📏 最大完成长度: {max_completion_length}")
 
 # 添加vllm采样参数（参照测试文件）
-from vllm import SamplingParams
+try:
+    from vllm import SamplingParams
+    VLLM_AVAILABLE = True
+    print("✅ vLLM 已安装")
+except ImportError:
+    print("⚠️ vLLM 未安装，将使用默认采样参数")
+    VLLM_AVAILABLE = False
+    # 创建一个简单的替代类
+    class SamplingParams:
+        def __init__(self, **kwargs):
+            self._kwargs = kwargs
 
-vllm_sampling_params = SamplingParams(
-    min_p=0.1,
-    top_p=1.0,
-    top_k=-1,
-    seed=42,
-    stop=[tokenizer.eos_token],
-    include_stop_str_in_output=True,
-)
+if VLLM_AVAILABLE:
+    vllm_sampling_params = SamplingParams(
+        min_p=0.1,
+        top_p=1.0,
+        top_k=-1,
+        seed=42,
+        stop=[tokenizer.eos_token],
+        include_stop_str_in_output=True,
+    )
+else:
+    vllm_sampling_params = None
 
-from trl import GRPOConfig, GRPOTrainer
+try:
+    from trl import GRPOConfig, GRPOTrainer
+    TRL_AVAILABLE = True
+    print("✅ TRL 已安装")
+except ImportError:
+    print("❌ TRL 未安装，请先安装: pip install trl")
+    TRL_AVAILABLE = False
+    raise ImportError("需要安装 TRL 库才能进行 GRPO 训练")
 
 training_args = GRPOConfig(
     # vllm采样参数
