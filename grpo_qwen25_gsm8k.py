@@ -53,13 +53,45 @@ print(f"{'='*60}")
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="Qwen/Qwen2.5-1.5B-Instruct",
     max_seq_length=max_seq_length,
-    load_in_4bit=True,  # 4bit量化节省显存
-    fast_inference=False,  # GRPO训练时关闭
+    load_in_4bit=False,  # 参照测试文件，GRPO训练时不使用4bit
+    fast_inference=True,  # 参照测试文件
     max_lora_rank=lora_rank,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=0.7,  # 参照测试文件
 )
 
 print("✅ 模型加载完成！")
+
+# 设置chat template（参照测试文件）
+chat_template = (
+    "{% if messages[0]['role'] == 'system' %}"
+    "{{ messages[0]['content'] + eos_token }}"
+    "{% set loop_messages = messages[1:] %}"
+    "{% else %}"
+    "{{ '{system_prompt}' + eos_token }}"
+    "{% set loop_messages = messages %}"
+    "{% endif %}"
+    "{% for message in loop_messages %}"
+    "{% if message['role'] == 'user' %}"
+    "{{ message['content'] }}"
+    "{% elif message['role'] == 'assistant' %}"
+    "{{ message['content'] + eos_token }}"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}{{ '{reasoning_start}' }}"
+    "{% endif %}"
+)
+
+system_prompt = f"""You are given a problem.
+Think about the problem and provide your working out.
+Place it between {reasoning_start} and {reasoning_end}.
+Then, provide your solution between {solution_start}{solution_end}"""
+
+chat_template = chat_template.replace(
+    "'{system_prompt}'", f"'{system_prompt}'"
+).replace("'{reasoning_start}'", f"'{reasoning_start}'")
+tokenizer.chat_template = chat_template
+
+print("✅ Chat template配置完成！")
 
 # ============================================================================
 # 2. LoRA配置
@@ -74,13 +106,9 @@ model = FastLanguageModel.get_peft_model(
     r=lora_rank,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                    "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=32,
-    lora_dropout=0.05,
-    bias="none",
+    lora_alpha=lora_rank * 2,  # 参照测试文件
     use_gradient_checkpointing="unsloth",
-    random_state=42,
-    max_seq_length=max_seq_length,
-    use_rslora=False,
+    random_state=42,  # 参照测试文件使用3407
 )
 
 print("✅ LoRA配置完成！")
@@ -93,11 +121,11 @@ print(f"\n{'='*60}")
 print("📚 准备GSM8K数据集...")
 print(f"{'='*60}")
 
-# 定义格式化标签
-reasoning_start = "<reasoning>"
-reasoning_end = "</reasoning>"
-solution_start = "<answer>"
-solution_end = "</answer>"
+# 定义格式化标签（参照测试文件）
+reasoning_start = "<start_working_out>"
+reasoning_end = "<end_working_out>"
+solution_start = "<SOLUTION>"
+solution_end = "</SOLUTION>"
 
 def extract_answer_from_gsm8k(text):
     """从GSM8K格式中提取最终答案"""
@@ -107,16 +135,15 @@ def extract_answer_from_gsm8k(text):
 
 def format_gsm8k_for_grpo(example):
     """将GSM8K格式化为GRPO训练格式"""
-    system_prompt = (
-        f"You are a helpful math tutor. When solving problems, think step by step. "
-        f"Place your reasoning between {reasoning_start} and {reasoning_end}. "
-        f"Then provide your final numerical answer between {solution_start} and {solution_end}."
-    )
+    system_prompt = f"""You are given a problem.
+Think about the problem and provide your working out.
+Place it between {reasoning_start} and {reasoning_end}.
+Then, provide your solution between {solution_start}{solution_end}"""
     
     return {
         "prompt": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Problem: {example['question']}\n\nSolve this step by step."},
+            {"role": "user", "content": example['question']},
         ],
         "answer": extract_answer_from_gsm8k(example["answer"]),
         "full_solution": example["answer"]  # 保留完整解答用于参考
@@ -155,14 +182,14 @@ def format_checker_exact(prompts, completions, ground_truth_answers, **kwargs):
     """检查是否严格按照格式输出"""
     scores = []
     for completion in completions:
-        completion_text = completion.strip()
+        response = completion[0]["content"]  # 修复：正确访问completion内容
         
         # 检查是否包含所需的标签
-        has_reasoning = reasoning_start in completion_text and reasoning_end in completion_text
-        has_answer = solution_start in completion_text and solution_end in completion_text
+        has_reasoning = reasoning_start in response and reasoning_end in response
+        has_answer = solution_start in response and solution_end in response
         
         if has_reasoning and has_answer:
-            scores.append(1.0)
+            scores.append(3.0)  # 修复：使用更高的分数
         else:
             scores.append(0.0)
     
@@ -172,94 +199,104 @@ def format_checker_flexible(prompts, completions, ground_truth_answers, **kwargs
     """灵活的格式检查"""
     scores = []
     for completion in completions:
-        completion_text = completion.strip().lower()
+        response = completion[0]["content"]  # 修复：正确访问completion内容
         
-        # 检查是否包含推理相关关键词
-        reasoning_keywords = ["reasoning", "think", "step", "because", "therefore", "since"]
-        answer_keywords = ["answer", "result", "solution", "final"]
+        score = 0
+        score += 0.5 if response.count(reasoning_end) == 1 else -1.0
+        score += 0.5 if response.count(solution_start) == 1 else -1.0
+        score += 0.5 if response.count(solution_end) == 1 else -1.0
         
-        has_reasoning_content = any(keyword in completion_text for keyword in reasoning_keywords)
-        has_answer_content = any(keyword in completion_text for keyword in answer_keywords)
-        
-        if has_reasoning_content and has_answer_content:
-            scores.append(0.8)
-        elif has_reasoning_content or has_answer_content:
-            scores.append(0.4)
-        else:
-            scores.append(0.1)
+        scores.append(score)
     
     return scores
 
-def answer_correctness_checker(prompts, completions, ground_truth_answers, **kwargs):
+def answer_correctness_checker(prompts, completions, answer, **kwargs):
     """检查答案正确性"""
+    question = prompts[0][-1]["content"]  # 修复：正确访问prompt
+    responses = [completion[0]["content"] for completion in completions]  # 修复：正确访问completion
+    
+    # 使用正则表达式匹配答案
+    match_format = re.compile(
+        rf"{reasoning_end}.*?"
+        rf"{solution_start}(.+?){solution_end}"
+        rf"[\s]{{0,}}$",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    
+    extracted_responses = [
+        guess.group(1) if (guess := match_format.search(r)) is not None else None
+        for r in responses
+    ]
+    
     scores = []
-    
-    for completion, gt_answer in zip(completions, ground_truth_answers):
-        if gt_answer is None:
-            scores.append(0.0)
+    for guess, true_answer in zip(extracted_responses, answer):
+        score = 0
+        if guess is None:
+            scores.append(-2.0)
             continue
-            
-        completion_text = completion.strip()
-        
-        # 尝试从completion中提取数字答案
-        # 优先从<answer>标签中提取
-        answer_match = re.search(rf'{re.escape(solution_start)}(.*?){re.escape(solution_end)}', 
-                                completion_text, re.DOTALL)
-        if answer_match:
-            predicted_text = answer_match.group(1).strip()
+        if guess == true_answer:
+            score += 5.0
+        elif guess.strip() == true_answer.strip():
+            score += 3.5
         else:
-            # 如果没有标签，从整个文本中提取最后的数字
-            predicted_text = completion_text
-        
-        # 提取数字
-        predicted_numbers = re.findall(r'-?\d+(?:\.\d+)?', predicted_text)
-        gt_numbers = re.findall(r'-?\d+(?:\.\d+)?', str(gt_answer))
-        
-        if predicted_numbers and gt_numbers:
             try:
-                predicted_num = float(predicted_numbers[-1])  # 取最后一个数字
-                gt_num = float(gt_numbers[-1])
-                
-                if abs(predicted_num - gt_num) < 1e-6:  # 数值相等
-                    scores.append(1.0)
+                ratio = float(guess) / float(true_answer)
+                if ratio >= 0.9 and ratio <= 1.1:
+                    score += 2.0
+                elif ratio >= 0.8 and ratio <= 1.2:
+                    score += 1.5
                 else:
-                    scores.append(0.0)
-            except ValueError:
-                scores.append(0.0)
-        else:
-            scores.append(0.0)
-    
+                    score -= 2.5
+            except:
+                score -= 4.5
+        scores.append(score)
     return scores
 
-def reasoning_quality_checker(prompts, completions, ground_truth_answers, **kwargs):
-    """检查推理质量"""
+def reasoning_quality_checker(prompts, completions, answer, **kwargs):
+    """检查推理质量 - 使用数字匹配（带调试输出）"""
+    question = prompts[0][-1]["content"]
+    responses = [completion[0]["content"] for completion in completions]
+    
+    # 匹配数字的正则表达式
+    match_numbers = re.compile(
+        solution_start + r".*?[\s]{0,}([-]?[\d\.\,]{1,})", flags=re.MULTILINE | re.DOTALL
+    )
+    
+    extracted_responses = [
+        guess.group(1) if (guess := match_numbers.search(r)) is not None else None
+        for r in responses
+    ]
+    
     scores = []
+    global PRINTED_TIMES
+    global PRINT_EVERY_STEPS
+    if PRINTED_TIMES % PRINT_EVERY_STEPS == 0:
+        print(
+            "*" * 20 + f"Question:\n{question}",
+            f"\nAnswer:\n{answer[0]}",
+            f"\nResponse:\n{responses[0]}",
+            f"\nExtracted:\n{extracted_responses[0]}",
+        )
+    PRINTED_TIMES += 1
     
-    for completion in completions:
-        completion_text = completion.strip()
-        
-        # 基础分数
-        score = 0.3
-        
-        # 检查推理长度（更长的推理通常更详细）
-        if len(completion_text) > 100:
-            score += 0.2
-        
-        # 检查是否包含数学相关词汇
-        math_keywords = ["multiply", "divide", "add", "subtract", "calculate", 
-                        "equation", "solve", "total", "sum", "difference"]
-        math_count = sum(1 for keyword in math_keywords if keyword in completion_text.lower())
-        score += min(math_count * 0.1, 0.3)
-        
-        # 检查逻辑连接词
-        logic_keywords = ["therefore", "so", "thus", "hence", "because", "since", 
-                         "first", "then", "next", "finally"]
-        logic_count = sum(1 for keyword in logic_keywords if keyword in completion_text.lower())
-        score += min(logic_count * 0.05, 0.2)
-        
-        scores.append(min(score, 1.0))
-    
+    for guess, true_answer in zip(extracted_responses, answer):
+        if guess is None:
+            scores.append(-2.5)
+            continue
+        try:
+            true_answer = float(true_answer.strip())
+            guess = float(guess.strip().replace(",", ""))
+            scores.append(3.5 if guess == true_answer else -1.5)
+        except:
+            scores.append(0)
+            continue
     return scores
+
+# 添加调试变量（参照测试文件）
+global PRINTED_TIMES
+PRINTED_TIMES = 0
+global PRINT_EVERY_STEPS
+PRINT_EVERY_STEPS = 5
 
 print("✅ 奖励函数定义完成！")
 
@@ -283,20 +320,35 @@ max_completion_length = max_seq_length - max_prompt_length
 print(f"📏 最大提示长度: {max_prompt_length}")
 print(f"📏 最大完成长度: {max_completion_length}")
 
+# 添加vllm采样参数（参照测试文件）
+from vllm import SamplingParams
+
+vllm_sampling_params = SamplingParams(
+    min_p=0.1,
+    top_p=1.0,
+    top_k=-1,
+    seed=42,
+    stop=[tokenizer.eos_token],
+    include_stop_str_in_output=True,
+)
+
 from trl import GRPOConfig, GRPOTrainer
 
 training_args = GRPOConfig(
+    # vllm采样参数
+    vllm_sampling_params=vllm_sampling_params,
+    temperature=1.0,
+    
     # 基础训练参数
-    learning_rate=3e-6,  # 较小的学习率确保稳定训练
+    learning_rate=5e-6,  # 参照测试文件的学习率
     weight_decay=0.01,
     warmup_ratio=0.1,
-    lr_scheduler_type="cosine",
+    lr_scheduler_type="linear",  # 参照测试文件
     optim="adamw_8bit",  # 8bit优化器节省显存
     
     # 批次和梯度参数
     per_device_train_batch_size=1,
-    gradient_accumulation_steps=8,  # 增加梯度累积步数
-    max_grad_norm=1.0,
+    gradient_accumulation_steps=1,  # 参照测试文件
     
     # GRPO特定参数
     num_generations=4,  # 每次生成4个候选答案
@@ -304,19 +356,15 @@ training_args = GRPOConfig(
     max_completion_length=max_completion_length,
     
     # 训练步数和保存
-    max_steps=500,  # 适中的训练步数
-    save_steps=100,
-    logging_steps=10,
-    eval_steps=100,
+    max_steps=100,  # 先减少步数测试
+    save_steps=50,
+    logging_steps=1,  # 参照测试文件
     
     # 输出和日志
     output_dir=CHECKPOINT_PATH,
-    logging_dir=LOG_PATH,
-    report_to="tensorboard",  # 使用tensorboard记录日志
+    report_to="none",  # 参照测试文件，避免日志问题
     
     # 其他参数
-    dataloader_num_workers=4,
-    remove_unused_columns=False,
     seed=42,
 )
 
