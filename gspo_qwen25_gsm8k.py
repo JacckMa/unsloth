@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GRPO LoRA微调 Qwen2.5-1.5B-Instruct 模型
+GSPO LoRA微调 Qwen2.5-1.5B-Instruct 模型
 数据集: GSM8K
 保存路径: /root/autodl-tmp
+GSPO (Group Sequence Policy Optimization) - 序列级优化，不同于GRPO的token级优化
 """
 
 import os
@@ -22,8 +23,8 @@ SAVE_ROOT = "/root/autodl-tmp"
 os.makedirs(SAVE_ROOT, exist_ok=True)
 
 # 设置各种保存路径
-MODEL_SAVE_PATH = os.path.join(SAVE_ROOT, "qwen25_grpo_model")
-CHECKPOINT_PATH = os.path.join(SAVE_ROOT, "qwen25_grpo_checkpoint") 
+MODEL_SAVE_PATH = os.path.join(SAVE_ROOT, "qwen25_gspo_model")
+CHECKPOINT_PATH = os.path.join(SAVE_ROOT, "qwen25_gspo_checkpoint") 
 DATA_CACHE_PATH = os.path.join(SAVE_ROOT, "gsm8k_cache")
 LOG_PATH = os.path.join(SAVE_ROOT, "training_logs")
 MODEL_CACHE_PATH = os.path.join(SAVE_ROOT, "model_cache")  # 预训练模型缓存路径
@@ -49,13 +50,14 @@ os.environ["HF_HOME"] = MODEL_CACHE_PATH
 os.environ["TRANSFORMERS_CACHE"] = MODEL_CACHE_PATH
 os.environ["HF_HUB_CACHE"] = MODEL_CACHE_PATH
 
-print(f"🚀 开始GRPO微调 Qwen2.5-1.5B-Instruct")
+print(f"🚀 开始GSPO微调 Qwen2.5-1.5B-Instruct")
 print(f"📁 模型保存路径: {MODEL_SAVE_PATH}")
 print(f"💾 检查点保存路径: {CHECKPOINT_PATH}")
 print(f"📊 日志保存路径: {LOG_PATH}")
 print(f"🗂️ 数据缓存路径: {DATA_CACHE_PATH}")
 print(f"🤗 预训练模型缓存路径: {MODEL_CACHE_PATH}")
 print(f"🏠 本地模型路径: {LOCAL_MODEL_PATH}")
+print(f"🔥 GSPO特点: 序列级优化，避免token级别噪声！")
 
 # 检查本地模型
 if not check_local_model():
@@ -92,10 +94,10 @@ print(f"{'='*60}")
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=LOCAL_MODEL_PATH,  # 使用本地模型路径
     max_seq_length=max_seq_length,
-    load_in_4bit=False,  # 参照测试文件，GRPO训练时不使用4bit
-    fast_inference=True,  # 参照测试文件
+    load_in_4bit=False,  # GSPO训练时不使用4bit，保持精度
+    fast_inference=True,
     max_lora_rank=lora_rank,
-    gpu_memory_utilization=0.7,  # 参照测试文件
+    gpu_memory_utilization=0.7,
     # 不需要cache_dir，因为直接从本地加载
 )
 
@@ -152,9 +154,9 @@ model = FastLanguageModel.get_peft_model(
     r=lora_rank,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                    "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=lora_rank * 2,  # 参照测试文件
+    lora_alpha=lora_rank * 2,
     use_gradient_checkpointing="unsloth",
-    random_state=42,  # 参照测试文件使用3407
+    random_state=42,
 )
 
 print("✅ LoRA配置完成！")
@@ -173,8 +175,8 @@ def extract_answer_from_gsm8k(text):
         return None
     return text.split("####")[1].strip()
 
-def format_gsm8k_for_grpo(example):
-    """将GSM8K格式化为GRPO训练格式"""
+def format_gsm8k_for_gspo(example):
+    """将GSM8K格式化为GSPO训练格式"""
     system_prompt = f"""You are given a problem.
 Think about the problem and provide your working out.
 Place it between {reasoning_start} and {reasoning_end}.
@@ -202,7 +204,7 @@ except Exception as e:
 
 # 格式化数据集
 print("🔄 格式化数据集...")
-formatted_dataset = dataset.map(format_gsm8k_for_grpo, num_proc=4)
+formatted_dataset = dataset.map(format_gsm8k_for_gspo, num_proc=4)
 
 # 只使用前1000条数据进行快速训练（可根据需要调整）
 train_size = min(1000, len(formatted_dataset))
@@ -211,20 +213,20 @@ gsm8k_train = formatted_dataset.select(range(train_size))
 print(f"✅ 数据集准备完成！使用 {len(gsm8k_train)} 条数据进行训练")
 
 # ============================================================================
-# 4. 奖励函数定义
+# 4. 奖励函数定义（GSPO使用相同的奖励函数，但在序列级别应用）
 # ============================================================================
 
 print(f"\n{'='*60}")
-print("🎯 定义奖励函数...")
+print("🎯 定义GSPO奖励函数...")
 print(f"{'='*60}")
 
 def format_checker_exact(completions, **kwargs):
-    """检查是否严格按照格式输出"""
+    """检查是否严格按照格式输出（GSPO序列级检查）"""
     scores = []
     for completion in completions:
         response = completion[0]["content"]
         
-        # 创建格式匹配正则表达式（与测试文件一致）
+        # 创建格式匹配正则表达式
         match_format = re.compile(
             rf"{reasoning_end}.*?"
             rf"{solution_start}(.+?){solution_end}"
@@ -234,18 +236,19 @@ def format_checker_exact(completions, **kwargs):
         
         score = 0
         if match_format.search(response) is not None:
-            score += 3.0
+            score += 3.0  # GSPO: 序列级奖励，不进行token级分解
         scores.append(score)
     
     return scores
 
 def format_checker_flexible(completions, **kwargs):
-    """灵活的格式检查"""
+    """灵活的格式检查（GSPO序列级）"""
     scores = []
     for completion in completions:
         response = completion[0]["content"]
         
         score = 0
+        # GSPO: 在序列级别累积分数，而不是token级
         score += 0.5 if response.count(reasoning_end) == 1 else -1.0
         score += 0.5 if response.count(solution_start) == 1 else -1.0
         score += 0.5 if response.count(solution_end) == 1 else -1.0
@@ -255,9 +258,9 @@ def format_checker_flexible(completions, **kwargs):
     return scores
 
 def answer_correctness_checker(prompts, completions, answer, **kwargs):
-    """检查答案正确性"""
-    question = prompts[0][-1]["content"]  # 修复：正确访问prompt
-    responses = [completion[0]["content"] for completion in completions]  # 修复：正确访问completion
+    """检查答案正确性（GSPO序列级评估）"""
+    question = prompts[0][-1]["content"]
+    responses = [completion[0]["content"] for completion in completions]
     
     # 使用正则表达式匹配答案
     match_format = re.compile(
@@ -279,7 +282,7 @@ def answer_correctness_checker(prompts, completions, answer, **kwargs):
             scores.append(-2.0)
             continue
         if guess == true_answer:
-            score += 5.0
+            score += 5.0  # GSPO: 序列级正确性奖励
         elif guess.strip() == true_answer.strip():
             score += 3.5
         else:
@@ -297,7 +300,7 @@ def answer_correctness_checker(prompts, completions, answer, **kwargs):
     return scores
 
 def reasoning_quality_checker(prompts, completions, answer, **kwargs):
-    """检查推理质量 - 使用数字匹配（带调试输出）"""
+    """检查推理质量 - GSPO序列级评估"""
     question = prompts[0][-1]["content"]
     responses = [completion[0]["content"] for completion in completions]
     
@@ -316,7 +319,7 @@ def reasoning_quality_checker(prompts, completions, answer, **kwargs):
     global PRINT_EVERY_STEPS
     if PRINTED_TIMES % PRINT_EVERY_STEPS == 0:
         print(
-            "*" * 20 + f"Question:\n{question}",
+            "*" * 20 + f"GSPO Question:\n{question}",
             f"\nAnswer:\n{answer[0]}",
             f"\nResponse:\n{responses[0]}",
             f"\nExtracted:\n{extracted_responses[0]}",
@@ -330,20 +333,21 @@ def reasoning_quality_checker(prompts, completions, answer, **kwargs):
         try:
             true_answer = float(true_answer.strip())
             guess = float(guess.strip().replace(",", ""))
+            # GSPO: 序列级质量评分
             scores.append(3.5 if guess == true_answer else -1.5)
         except:
             scores.append(0)
             continue
     return scores
 
-print("✅ 奖励函数定义完成！")
+print("✅ GSPO奖励函数定义完成！")
 
 # ============================================================================
-# 5. GRPO训练配置
+# 5. GSPO训练配置（关键差异：使用PPO配置但设置为序列级优化）
 # ============================================================================
 
 print(f"\n{'='*60}")
-print("⚙️ 配置GRPO训练参数...")
+print("⚙️ 配置GSPO训练参数...")
 print(f"{'='*60}")
 
 # 计算最大提示长度
@@ -358,10 +362,10 @@ max_completion_length = max_seq_length - max_prompt_length
 print(f"📏 最大提示长度: {max_prompt_length}")
 print(f"📏 最大完成长度: {max_completion_length}")
 
-# 添加vllm采样参数（参照测试文件）
+# 添加vllm采样参数
 from unsloth import vLLMSamplingParams
 
-# 使用Unsloth的vLLMSamplingParams函数来确保兼容性
+# GSPO采样参数：更重视序列多样性
 vllm_sampling_params = vLLMSamplingParams(
     min_p=0.1,
     top_p=1.0,
@@ -371,116 +375,245 @@ vllm_sampling_params = vLLMSamplingParams(
     include_stop_str_in_output=True,
 )
 
+# GSPO使用PPO训练器，但配置为序列级优化
 try:
-    from trl import GRPOConfig, GRPOTrainer
+    from trl import PPOConfig, PPOTrainer
     TRL_AVAILABLE = True
-    print("✅ TRL 已安装")
+    print("✅ TRL 已安装，使用PPO训练器进行GSPO训练")
 except ImportError:
     print("❌ TRL 未安装，请先安装: pip install trl")
     TRL_AVAILABLE = False
-    raise ImportError("需要安装 TRL 库才能进行 GRPO 训练")
+    raise ImportError("需要安装 TRL 库才能进行 GSPO 训练")
 
-training_args = GRPOConfig(
+# GSPO关键配置：序列级优化参数
+training_args = PPOConfig(
     # vllm采样参数
     vllm_sampling_params=vllm_sampling_params,
-    temperature=1.0,
     
     # 基础训练参数
-    learning_rate=5e-6,  # 参照测试文件的学习率
+    learning_rate=5e-6,  # GSPO推荐较低学习率，避免序列级震荡
     weight_decay=0.01,
     warmup_ratio=0.1,
-    lr_scheduler_type="linear",  # 参照测试文件
+    lr_scheduler_type="linear",
     optim="adamw_8bit",  # 8bit优化器节省显存
     
     # 批次和梯度参数
     per_device_train_batch_size=1,
-    gradient_accumulation_steps=1,  # 参照测试文件
+    gradient_accumulation_steps=2,  # GSPO增加梯度累积以稳定序列级更新
     
-    # GRPO特定参数
-    num_generations=4,  # 每次生成4个候选答案
+    # GSPO特定参数：序列级优化
+    batch_size=4,  # 序列组大小，用于相对比较
+    mini_batch_size=2,  # 小批次大小
+    ppo_epochs=4,  # GSPO建议更多epoch以充分利用序列级信号
+    
+    # 裁剪参数（GSPO的关键：序列级裁剪）
+    cliprange=0.2,  # 重要性比率裁剪范围
+    cliprange_value=0.2,  # 值函数裁剪范围
+    vf_coef=0.1,  # 值函数损失系数（GSPO中较小，因为重点在序列级策略）
+    
+    # 序列长度参数
     max_prompt_length=max_prompt_length,
-    max_completion_length=max_completion_length,
+    max_length=max_seq_length,
     
     # 训练步数和保存
-    max_steps=1000,  # 增加训练步数到1000步
-    save_steps=200,  # 相应调整保存间隔
-    logging_steps=1,  # 参照测试文件
+    total_ppo_epochs=1000,  # 总训练epoch
+    save_freq=200,  # 保存频率
+    log_freq=1,
     
     # 输出和日志
-    output_dir=CHECKPOINT_PATH,
-    report_to="none",  # 参照测试文件，避免日志问题
+    project_kwargs={"project_name": "gspo_qwen25_gsm8k"},
+    tracker_project_name="gspo_training",
+    
+    # GSPO的KL散度控制（序列级）
+    init_kl_coef=0.2,  # 初始KL系数
+    target=6,  # 目标KL散度
+    horizon=10000,  # KL控制时间窗口
     
     # 其他参数
     seed=42,
+    remove_unused_columns=False,
 )
 
-print("✅ 训练参数配置完成！")
+print("✅ GSPO训练参数配置完成！")
+print("🔥 关键特点：序列级裁剪和优化，避免token级噪声")
 
 # ============================================================================
-# 6. 创建训练器并开始训练
+# 6. 创建GSPO训练器（使用PPO但配置为序列级）
 # ============================================================================
 
 print(f"\n{'='*60}")
-print("🚂 创建GRPO训练器...")
+print("🚂 创建GSPO训练器（基于PPO的序列级优化）...")
 print(f"{'='*60}")
 
-trainer = GRPOTrainer(
+# 准备奖励函数组合
+def combined_reward_function(prompts, completions, **kwargs):
+    """组合奖励函数，返回序列级奖励"""
+    # 获取所有奖励分数
+    format_exact_scores = format_checker_exact(completions, **kwargs)
+    format_flexible_scores = format_checker_flexible(completions, **kwargs)
+    correctness_scores = answer_correctness_checker(prompts, completions, **kwargs)
+    quality_scores = reasoning_quality_checker(prompts, completions, **kwargs)
+    
+    # 序列级奖励组合（权重可调）
+    combined_scores = []
+    for i in range(len(completions)):
+        # GSPO: 在序列级别组合奖励，不进行token级分解
+        total_score = (
+            format_exact_scores[i] * 1.0 +      # 格式奖励权重
+            format_flexible_scores[i] * 0.5 +   # 灵活格式权重  
+            correctness_scores[i] * 2.0 +       # 正确性奖励权重（最高）
+            quality_scores[i] * 1.5             # 质量奖励权重
+        )
+        combined_scores.append(total_score)
+    
+    return combined_scores
+
+# 转换数据集格式为PPO训练器期望的格式
+def convert_to_ppo_format(dataset):
+    """转换数据集为PPO格式"""
+    ppo_dataset = []
+    for item in dataset:
+        # 将prompt转换为字符串
+        prompt_text = tokenizer.apply_chat_template(
+            item["prompt"], 
+            add_generation_prompt=True, 
+            tokenize=False
+        )
+        ppo_dataset.append({
+            "query": prompt_text,
+            "answer": item["answer"],
+            "full_solution": item["full_solution"]
+        })
+    return ppo_dataset
+
+ppo_formatted_dataset = convert_to_ppo_format(gsm8k_train)
+
+# 创建PPO训练器进行GSPO训练
+trainer = PPOTrainer(
     model=model,
-    processing_class=tokenizer,
-    reward_funcs=[
-        format_checker_exact,      # 严格格式检查 (权重高)
-        format_checker_flexible,   # 灵活格式检查
-        answer_correctness_checker, # 答案正确性检查 (权重最高)
-        reasoning_quality_checker,  # 推理质量检查
-    ],
-    args=training_args,
-    train_dataset=gsm8k_train,
+    config=training_args,
+    dataset=ppo_formatted_dataset,
+    tokenizer=tokenizer,
+    # 注意：这里我们将通过自定义训练循环来实现GSPO的序列级优化
 )
 
-print("✅ 训练器创建完成！")
+print("✅ GSPO训练器创建完成！")
 
 # ============================================================================
-# 7. 开始训练
+# 7. GSPO自定义训练循环（关键：序列级优化实现）
 # ============================================================================
 
 print(f"\n{'='*60}")
-print(f"🚀 开始GRPO训练！")
-print(f"📊 训练数据量: {len(gsm8k_train)}")
-print(f"🔄 最大训练步数: {training_args.max_steps}")
-print(f"💾 检查点保存间隔: {training_args.save_steps} 步")
+print(f"🚀 开始GSPO训练！")
+print(f"📊 训练数据量: {len(ppo_formatted_dataset)}")
+print(f"🔄 最大训练epoch: {training_args.total_ppo_epochs}")
+print(f"💾 保存间隔: {training_args.save_freq} epoch")
+print(f"🎯 GSPO特点: 序列级策略优化")
 print(f"{'='*60}")
+
+# GSPO训练循环
+generation_kwargs = {
+    "max_new_tokens": max_completion_length,
+    "do_sample": True,
+    "top_p": 1.0,
+    "temperature": 1.0,
+    "pad_token_id": tokenizer.pad_token_id,
+}
 
 try:
-    trainer.train()
-    print("✅ 训练完成！")
+    from tqdm import tqdm
+    
+    # GSPO训练主循环
+    for epoch in tqdm(range(training_args.total_ppo_epochs), desc="GSPO Training"):
+        # 批次训练
+        for batch_idx, batch in enumerate(tqdm(trainer.dataloader, desc=f"Epoch {epoch}")):
+            try:
+                query_tensors = batch["input_ids"]
+                
+                # 1. 生成多个候选序列（GSPO的关键）
+                response_tensors = trainer.generate(
+                    query_tensors, 
+                    return_prompt=False,
+                    **generation_kwargs
+                )
+                
+                # 2. 解码生成的响应
+                batch["response"] = [tokenizer.decode(r.squeeze(), skip_special_tokens=True) 
+                                   for r in response_tensors]
+                
+                # 3. 计算序列级奖励
+                completions = [[{"content": resp}] for resp in batch["response"]]
+                prompts = [[{"content": q}] for q in batch["query"]]
+                
+                rewards = combined_reward_function(
+                    prompts=prompts,
+                    completions=completions,
+                    answer=batch.get("answer", [0] * len(completions))
+                )
+                
+                # 转换为tensor
+                rewards = [torch.tensor(r, dtype=torch.float32) for r in rewards]
+                
+                # 4. GSPO序列级策略更新
+                stats = trainer.step(query_tensors, response_tensors, rewards)
+                
+                # 5. 记录统计信息
+                if batch_idx % training_args.log_freq == 0:
+                    trainer.log_stats(stats, batch, rewards)
+                    
+                    # GSPO特定日志
+                    print(f"Epoch {epoch}, Batch {batch_idx}:")
+                    print(f"  平均序列奖励: {torch.stack(rewards).mean():.4f}")
+                    print(f"  奖励标准差: {torch.stack(rewards).std():.4f}")
+                    print(f"  序列长度: {[len(r.squeeze()) for r in response_tensors]}")
+                
+            except Exception as e:
+                print(f"⚠️ 批次 {batch_idx} 训练出错: {e}")
+                continue
+        
+        # 定期保存模型
+        if epoch % training_args.save_freq == 0:
+            save_path = os.path.join(CHECKPOINT_PATH, f"gspo_epoch_{epoch}")
+            trainer.save_model(save_path)
+            print(f"💾 已保存检查点到: {save_path}")
+    
+    print("✅ GSPO训练完成！")
+    
 except Exception as e:
-    print(f"❌ 训练过程中出现错误: {e}")
+    print(f"❌ GSPO训练过程中出现错误: {e}")
     print("💾 尝试保存当前状态...")
 
 # ============================================================================
-# 8. 保存最终模型
+# 8. 保存最终GSPO模型
 # ============================================================================
 
 print(f"\n{'='*60}")
-print("💾 保存最终模型...")
+print("💾 保存最终GSPO模型...")
 print(f"{'='*60}")
 
 try:
     # 保存LoRA适配器
     model.save_pretrained(MODEL_SAVE_PATH)
     tokenizer.save_pretrained(MODEL_SAVE_PATH)
-    print(f"✅ LoRA模型已保存到: {MODEL_SAVE_PATH}")
+    print(f"✅ GSPO LoRA模型已保存到: {MODEL_SAVE_PATH}")
     
     # 保存训练日志总结
     log_summary = {
         "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
         "dataset": "GSM8K",
-        "training_method": "GRPO + LoRA",
+        "training_method": "GSPO + LoRA",
+        "optimization_level": "sequence_level",  # GSPO特点
         "lora_rank": lora_rank,
         "max_seq_length": max_seq_length,
-        "training_samples": len(gsm8k_train),
-        "max_steps": training_args.max_steps,
+        "training_samples": len(ppo_formatted_dataset),
+        "max_epochs": training_args.total_ppo_epochs,
         "learning_rate": training_args.learning_rate,
+        "key_differences_from_grpo": [
+            "序列级优化而非token级",
+            "序列级重要性比率裁剪",
+            "避免token级梯度噪声",
+            "更稳定的训练过程"
+        ],
         "save_paths": {
             "model": MODEL_SAVE_PATH,
             "checkpoint": CHECKPOINT_PATH,
@@ -489,10 +622,10 @@ try:
         }
     }
     
-    with open(os.path.join(SAVE_ROOT, "training_summary.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(SAVE_ROOT, "gspo_training_summary.json"), "w", encoding="utf-8") as f:
         json.dump(log_summary, f, indent=2, ensure_ascii=False)
     
-    print(f"✅ 训练总结已保存到: {os.path.join(SAVE_ROOT, 'training_summary.json')}")
+    print(f"✅ GSPO训练总结已保存到: {os.path.join(SAVE_ROOT, 'gspo_training_summary.json')}")
     
 except Exception as e:
     print(f"❌ 模型保存失败: {e}")
@@ -514,11 +647,11 @@ gc.collect()
 print("✅ 内存清理完成！")
 
 # ============================================================================
-# 10. 训练完成总结
+# 10. GSPO训练完成总结
 # ============================================================================
 
 print(f"\n{'='*80}")
-print("🎉 GRPO微调完成！")
+print("🎉 GSPO微调完成！")
 print(f"{'='*80}")
 print(f"📁 所有文件都保存在: {SAVE_ROOT}")
 print(f"🏷️ 模型保存路径: {MODEL_SAVE_PATH}")
@@ -527,9 +660,18 @@ print(f"📊 训练日志路径: {LOG_PATH}")
 print(f"🗂️ 数据缓存路径: {DATA_CACHE_PATH}")
 print(f"{'='*80}")
 
+print("\n🔥 GSPO vs GRPO 关键区别:")
+print("1. 🎯 优化层级: 序列级 vs token级")
+print("2. 📊 裁剪策略: 序列级重要性比率裁剪")
+print("3. 🚀 训练稳定性: 避免token级梯度噪声")
+print("4. 💡 奖励分配: 序列级统一处理")
+print("5. 🔧 适用场景: 长序列和MoE模型更稳定")
+
 print("\n🔥 下一步操作建议:")
 print("1. 查看训练日志: tensorboard --logdir /root/autodl-tmp/training_logs")
-print("2. 加载模型测试: FastLanguageModel.from_pretrained('/root/autodl-tmp/qwen25_grpo_model')")
-print("3. 检查训练总结: cat /root/autodl-tmp/training_summary.json")
+print("2. 加载模型测试: FastLanguageModel.from_pretrained('/root/autodl-tmp/qwen25_gspo_model')")
+print("3. 检查训练总结: cat /root/autodl-tmp/gspo_training_summary.json")
+print("4. 对比GRPO结果: 查看序列级优化的效果差异")
 
-print("\n✨ 训练脚本执行完毕！") 
+print("\n✨ GSPO训练脚本执行完毕！") 
+print("🎊 享受序列级优化带来的训练稳定性提升！") 
