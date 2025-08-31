@@ -1,7 +1,8 @@
 # GRPO微调所需依赖包
+# 锁定torch版本为2.5.1，防止自动升级
+torch==2.5.1
 unsloth>=2024.1.1
 vllm>=0.8.0
-torch>=2.0.0
 transformers>=4.51.3
 datasets>=3.4.1
 trl>=0.7.9
