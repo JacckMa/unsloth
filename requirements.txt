@@ -1,5 +1,6 @@
 # GRPO微调所需依赖包
 unsloth>=2024.1.1
+vllm>=0.8.0
 torch>=2.0.0
 transformers>=4.51.3
 datasets>=3.4.1
