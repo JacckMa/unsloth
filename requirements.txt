@@ -1,0 +1,15 @@
+# GRPO微调所需依赖包
+unsloth>=2024.1.1
+torch>=2.0.0
+transformers>=4.51.3
+datasets>=3.4.1
+trl>=0.7.9
+accelerate>=0.34.1
+peft>=0.7.1
+sentencepiece>=0.2.0
+tensorboard
+bitsandbytes>=0.45.5
+xformers>=0.0.22.post7
+numpy
+tqdm
+psutil 
