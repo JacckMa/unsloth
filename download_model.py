@@ -14,7 +14,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # 设置下载路径
-DOWNLOAD_ROOT = "root/autodl-tmp"
+DOWNLOAD_ROOT = "/root/autodl-tmp"
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 LOCAL_MODEL_PATH = os.path.join(DOWNLOAD_ROOT, "models", "Qwen2.5-1.5B-Instruct")
 

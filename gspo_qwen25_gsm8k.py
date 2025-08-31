@@ -362,18 +362,8 @@ max_completion_length = max_seq_length - max_prompt_length
 print(f"📏 最大提示长度: {max_prompt_length}")
 print(f"📏 最大完成长度: {max_completion_length}")
 
-# 添加vllm采样参数
-from unsloth import vLLMSamplingParams
-
-# GSPO采样参数：更重视序列多样性
-vllm_sampling_params = vLLMSamplingParams(
-    min_p=0.1,
-    top_p=1.0,
-    top_k=-1,
-    seed=42,
-    stop=[tokenizer.eos_token],
-    include_stop_str_in_output=True,
-)
+# 注意：由于TRL库版本更新，vLLMSamplingParams不再直接用于PPOConfig
+# 将在generation_kwargs中设置采样参数
 
 # GSPO使用PPO训练器，但配置为序列级优化
 try:
@@ -387,24 +377,12 @@ except ImportError:
 
 # GSPO关键配置：序列级优化参数
 training_args = PPOConfig(
-    # vllm采样参数
-    vllm_sampling_params=vllm_sampling_params,
-    
     # 基础训练参数
     learning_rate=5e-6,  # GSPO推荐较低学习率，避免序列级震荡
-    weight_decay=0.01,
-    warmup_ratio=0.1,
-    lr_scheduler_type="linear",
-    optim="adamw_8bit",  # 8bit优化器节省显存
     
-    # 批次和梯度参数
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=2,  # GSPO增加梯度累积以稳定序列级更新
-    
-    # GSPO特定参数：序列级优化
+    # 批次和梯度参数  
     batch_size=4,  # 序列组大小，用于相对比较
     mini_batch_size=2,  # 小批次大小
-    ppo_epochs=4,  # GSPO建议更多epoch以充分利用序列级信号
     
     # 裁剪参数（GSPO的关键：序列级裁剪）
     cliprange=0.2,  # 重要性比率裁剪范围
@@ -416,7 +394,7 @@ training_args = PPOConfig(
     max_length=max_seq_length,
     
     # 训练步数和保存
-    total_ppo_epochs=1000,  # 总训练epoch
+    steps=1000,  # 总训练步数
     save_freq=200,  # 保存频率
     log_freq=1,
     
@@ -506,8 +484,8 @@ print("✅ GSPO训练器创建完成！")
 print(f"\n{'='*60}")
 print(f"🚀 开始GSPO训练！")
 print(f"📊 训练数据量: {len(ppo_formatted_dataset)}")
-print(f"🔄 最大训练epoch: {training_args.total_ppo_epochs}")
-print(f"💾 保存间隔: {training_args.save_freq} epoch")
+print(f"🔄 最大训练步数: {training_args.steps}")
+print(f"💾 保存间隔: {training_args.save_freq} 步")
 print(f"🎯 GSPO特点: 序列级策略优化")
 print(f"{'='*60}")
 
@@ -516,72 +494,83 @@ generation_kwargs = {
     "max_new_tokens": max_completion_length,
     "do_sample": True,
     "top_p": 1.0,
+    "top_k": -1,  # 不限制top_k
     "temperature": 1.0,
     "pad_token_id": tokenizer.pad_token_id,
+    "eos_token_id": tokenizer.eos_token_id,
 }
 
 try:
     from tqdm import tqdm
     
-    # GSPO训练主循环
-    for epoch in tqdm(range(training_args.total_ppo_epochs), desc="GSPO Training"):
-        # 批次训练
-        for batch_idx, batch in enumerate(tqdm(trainer.dataloader, desc=f"Epoch {epoch}")):
-            try:
-                query_tensors = batch["input_ids"]
-                
-                # 1. 生成多个候选序列（GSPO的关键）
-                response_tensors = trainer.generate(
-                    query_tensors, 
-                    return_prompt=False,
-                    **generation_kwargs
-                )
-                
-                # 2. 解码生成的响应
-                batch["response"] = [tokenizer.decode(r.squeeze(), skip_special_tokens=True) 
-                                   for r in response_tensors]
-                
-                # 3. 计算序列级奖励
-                completions = [[{"content": resp}] for resp in batch["response"]]
-                prompts = [[{"content": q}] for q in batch["query"]]
-                
-                rewards = combined_reward_function(
-                    prompts=prompts,
-                    completions=completions,
-                    answer=batch.get("answer", [0] * len(completions))
-                )
-                
-                # 转换为tensor
-                rewards = [torch.tensor(r, dtype=torch.float32) for r in rewards]
-                
-                # 4. GSPO序列级策略更新
-                stats = trainer.step(query_tensors, response_tensors, rewards)
-                
-                # 5. 记录统计信息
-                if batch_idx % training_args.log_freq == 0:
-                    trainer.log_stats(stats, batch, rewards)
-                    
-                    # GSPO特定日志
-                    print(f"Epoch {epoch}, Batch {batch_idx}:")
-                    print(f"  平均序列奖励: {torch.stack(rewards).mean():.4f}")
-                    print(f"  奖励标准差: {torch.stack(rewards).std():.4f}")
-                    print(f"  序列长度: {[len(r.squeeze()) for r in response_tensors]}")
-                
-            except Exception as e:
-                print(f"⚠️ 批次 {batch_idx} 训练出错: {e}")
-                continue
-        
-        # 定期保存模型
-        if epoch % training_args.save_freq == 0:
-            save_path = os.path.join(CHECKPOINT_PATH, f"gspo_epoch_{epoch}")
-            trainer.save_model(save_path)
-            print(f"💾 已保存检查点到: {save_path}")
+    # GSPO训练主循环 - 使用PPO的标准训练方法
+    print("🚀 开始PPO训练循环...")
+    
+    # 简化的训练循环，使用PPOTrainer的内置方法
+    step = 0
+    max_steps = training_args.steps
+    
+    while step < max_steps:
+        try:
+            # 从数据集中采样一个批次
+            batch = next(iter(trainer.dataloader))
+            
+            # 获取queries
+            queries = batch["query"]
+            
+            # 生成响应
+            query_tensors = [tokenizer.encode(q, return_tensors="pt").squeeze() for q in queries]
+            response_tensors = trainer.generate(query_tensors, **generation_kwargs)
+            
+            # 计算奖励
+            responses = [tokenizer.decode(r.squeeze(), skip_special_tokens=True) for r in response_tensors]
+            
+            # 准备奖励计算的格式
+            completions = [[{"content": resp}] for resp in responses]
+            prompts = [[{"content": q}] for q in queries]
+            
+            rewards = combined_reward_function(
+                prompts=prompts,
+                completions=completions,
+                answer=batch.get("answer", [0] * len(completions))
+            )
+            
+            # 转换为tensor
+            reward_tensors = [torch.tensor(r, dtype=torch.float32) for r in rewards]
+            
+            # PPO更新步骤
+            stats = trainer.step(query_tensors, response_tensors, reward_tensors)
+            
+            # 记录统计信息
+            if step % training_args.log_freq == 0:
+                print(f"步骤 {step}:")
+                print(f"  平均序列奖励: {torch.stack(reward_tensors).mean():.4f}")
+                print(f"  奖励标准差: {torch.stack(reward_tensors).std():.4f}")
+                if stats:
+                    for key, value in stats.items():
+                        if isinstance(value, (int, float)):
+                            print(f"  {key}: {value:.4f}")
+            
+            # 定期保存模型
+            if step > 0 and step % training_args.save_freq == 0:
+                save_path = os.path.join(CHECKPOINT_PATH, f"gspo_step_{step}")
+                trainer.save_model(save_path)
+                print(f"💾 已保存检查点到: {save_path}")
+            
+            step += 1
+            
+        except Exception as e:
+            print(f"⚠️ 步骤 {step} 训练出错: {e}")
+            step += 1
+            continue
     
     print("✅ GSPO训练完成！")
     
 except Exception as e:
     print(f"❌ GSPO训练过程中出现错误: {e}")
     print("💾 尝试保存当前状态...")
+    import traceback
+    traceback.print_exc()
 
 # ============================================================================
 # 8. 保存最终GSPO模型
@@ -606,7 +595,7 @@ try:
         "lora_rank": lora_rank,
         "max_seq_length": max_seq_length,
         "training_samples": len(ppo_formatted_dataset),
-        "max_epochs": training_args.total_ppo_epochs,
+        "max_steps": training_args.steps,
         "learning_rate": training_args.learning_rate,
         "key_differences_from_grpo": [
             "序列级优化而非token级",
